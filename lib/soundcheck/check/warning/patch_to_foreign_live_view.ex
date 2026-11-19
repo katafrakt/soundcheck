@@ -32,6 +32,12 @@ defmodule Soundcheck.Check.Warning.PatchToForeignLiveView do
       matches any number of them, because the value can hold slashes. The
       check reports only when every matching live route renders another
       LiveView.
+
+      LiveView compares the patch with the LiveView the router mounted, not
+      with the module that calls `push_patch`. When no live route that
+      soundcheck read renders the calling LiveView, another LiveView may run
+      its callbacks, so the finding is unverifiable and appears only under
+      `strict`.
       """
     ]
 
@@ -43,6 +49,7 @@ defmodule Soundcheck.Check.Warning.PatchToForeignLiveView do
   @impl Soundcheck.Rule
   def analyze(%Graph{} = graph, _params) do
     routes = Graph.routes(graph)
+    routed = MapSet.new(routes, & &1.live_view)
 
     for {entry, :view} <- Graph.live_modules(graph),
         {path, span, anchor} <- Navigation.targets(graph, entry, :patch, [:server]),
@@ -51,13 +58,27 @@ defmodule Soundcheck.Check.Warning.PatchToForeignLiveView do
         Enum.all?(candidates, &(&1.live_view != entry.name)) do
       targets = candidates |> Enum.map(&inspect(&1.live_view)) |> Enum.uniq() |> Enum.join(" or ")
 
-      Diagnostic.new(
-        __MODULE__,
-        span,
-        "This patch from `#{inspect(entry.name)}` goes to a route rendered by #{targets}; " <>
-          "LiveView raises. Navigate instead.",
-        anchor: anchor
-      )
+      if MapSet.member?(routed, entry.name) do
+        Diagnostic.new(
+          __MODULE__,
+          span,
+          "This patch from `#{inspect(entry.name)}` goes to a route rendered by #{targets}; " <>
+            "LiveView raises. Navigate instead.",
+          anchor: anchor
+        )
+      else
+        # LiveView compares the patch with the root view. No route renders
+        # this module, so another LiveView may run its callbacks.
+        Diagnostic.new(
+          __MODULE__,
+          span,
+          "This patch from `#{inspect(entry.name)}` goes to a route rendered by #{targets}. " <>
+            "No live route soundcheck read renders `#{inspect(entry.name)}`, so the patch " <>
+            "is valid only if #{targets} runs this code.",
+          anchor: anchor,
+          resolution: {:unverifiable, :unrouted_live_view}
+        )
+      end
     end
   end
 end
